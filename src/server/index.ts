@@ -172,7 +172,7 @@ const server = serve({
       },
     },
 
-    "/api/repos/import": {
+    "/api/repos/preview": {
       async POST(req) {
         try {
           const body = (await req.json()) as {
@@ -188,24 +188,68 @@ const server = serve({
             excludeArchived: body.excludeArchived ?? true,
           });
 
+          const repos = remote.map((meta) => {
+            const owner = meta.owner.login;
+            const name = meta.name;
+            const existing = queries.findRepo.get(owner, name);
+            return {
+              owner,
+              name,
+              description: meta.description,
+              stars: meta.stargazers_count,
+              open_issues: meta.open_issues_count,
+              fork: meta.fork ?? false,
+              archived: meta.archived ?? false,
+              already_watched: Boolean(existing),
+            };
+          });
+
+          return json({
+            ok: true,
+            user,
+            total: repos.length,
+            repos,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return badRequest(msg);
+        }
+      },
+    },
+
+    "/api/repos/bulk": {
+      async POST(req) {
+        try {
+          const body = (await req.json()) as {
+            repos?: Array<{
+              owner?: string;
+              name?: string;
+              description?: string | null;
+              stars?: number;
+              open_issues?: number;
+            }>;
+          };
+          if (!Array.isArray(body.repos) || body.repos.length === 0) {
+            return badRequest("Falta 'repos' (array no vacío)");
+          }
+
           const now = new Date().toISOString();
           let added = 0;
           let skipped = 0;
 
-          for (const meta of remote) {
-            const owner = meta.owner.login;
-            const name = meta.name;
-            const existing = queries.findRepo.get(owner, name);
+          for (const meta of body.repos) {
+            if (!meta.owner || !meta.name) continue;
+            const existing = queries.findRepo.get(meta.owner, meta.name);
             if (existing) {
               skipped++;
               continue;
             }
             queries.insertRepo.get(
-              owner,
-              name,
-              meta.description,
-              meta.stargazers_count,
-              meta.open_issues_count,
+              meta.owner,
+              meta.name,
+              meta.description ?? null,
+              meta.stars ?? 0,
+              meta.open_issues ?? 0,
               now
             );
             added++;
@@ -215,8 +259,7 @@ const server = serve({
 
           return json({
             ok: true,
-            user,
-            total: remote.length,
+            total: body.repos.length,
             added,
             skipped,
           });

@@ -67,6 +67,24 @@ export type DigestPreview = {
   issues: number;
 };
 
+export type RepoPreview = {
+  owner: string;
+  name: string;
+  description: string | null;
+  stars: number;
+  open_issues: number;
+  fork: boolean;
+  archived: boolean;
+  already_watched: boolean;
+};
+
+export type UserPreview = {
+  ok: true;
+  user: string;
+  total: number;
+  repos: RepoPreview[];
+};
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   if (!res.ok) {
@@ -85,21 +103,32 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ repo }),
     }),
-  importUser: (
+  previewUser: (
     user: string,
     opts: { excludeForks?: boolean; excludeArchived?: boolean } = {}
   ) =>
-    request<{
-      ok: true;
-      user: string;
-      total: number;
-      added: number;
-      skipped: number;
-    }>("/api/repos/import", {
+    request<UserPreview>("/api/repos/preview", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ user, ...opts }),
     }),
+  bulkAddRepos: (
+    repos: Array<{
+      owner: string;
+      name: string;
+      description?: string | null;
+      stars?: number;
+      open_issues?: number;
+    }>
+  ) =>
+    request<{ ok: true; total: number; added: number; skipped: number }>(
+      "/api/repos/bulk",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repos }),
+      }
+    ),
   removeRepo: (id: number) =>
     request<{ ok: true }>(`/api/repos/${id}`, { method: "DELETE" }),
   listIssues: (limit = 100) =>

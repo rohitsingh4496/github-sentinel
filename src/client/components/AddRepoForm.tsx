@@ -1,5 +1,6 @@
 import { useMemo, useState, type FormEvent } from "react";
-import { api } from "../api";
+import { api, type UserPreview } from "../api";
+import { UserRepoPicker } from "./UserRepoPicker";
 
 type Props = {
   onAdded: () => void;
@@ -29,6 +30,7 @@ export function AddRepoForm({ onAdded }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+  const [preview, setPreview] = useState<UserPreview | null>(null);
 
   const mode = useMemo(() => detectMode(value), [value]);
 
@@ -40,15 +42,18 @@ export function AddRepoForm({ onAdded }: Props) {
     setInfo(null);
     try {
       if (mode === "user") {
-        const res = await api.importUser(value.trim());
-        setInfo(
-          `${res.user}: ${res.added} nuevos, ${res.skipped} ya vigilados (de ${res.total})`
-        );
+        const res = await api.previewUser(value.trim());
+        if (res.repos.length === 0) {
+          setInfo(`${res.user}: sin repos disponibles`);
+          setPreview(null);
+        } else {
+          setPreview(res);
+        }
       } else {
         await api.addRepo(value.trim());
+        setValue("");
+        onAdded();
       }
-      setValue("");
-      onAdded();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -57,7 +62,7 @@ export function AddRepoForm({ onAdded }: Props) {
   };
 
   const buttonLabel =
-    loading ? "..." : mode === "user" ? "watch all" : "watch";
+    loading ? "..." : mode === "user" ? "load repos" : "watch";
 
   return (
     <div>
@@ -72,7 +77,7 @@ export function AddRepoForm({ onAdded }: Props) {
           type="text"
           value={value}
           onChange={(e) => setValue(e.target.value)}
-          placeholder="owner/repo  ·  owner (todos sus repos)  ·  URL de GitHub"
+          placeholder="owner/repo  ·  owner (elige sus repos)  ·  URL de GitHub"
           className="flex-1 bg-transparent border-0 outline-none text-[var(--color-fg-1)] font-mono text-sm py-2 placeholder:text-[var(--color-fg-4)]"
           spellCheck={false}
           autoComplete="off"
@@ -93,6 +98,22 @@ export function AddRepoForm({ onAdded }: Props) {
         >
           {error ?? info}
         </div>
+      )}
+      {preview && (
+        <UserRepoPicker
+          preview={preview}
+          onCancel={() => setPreview(null)}
+          onDone={(added, skipped) => {
+            setPreview(null);
+            setValue("");
+            setInfo(
+              `${preview.user}: ${added} añadidos${
+                skipped > 0 ? `, ${skipped} ya vigilados` : ""
+              }`
+            );
+            onAdded();
+          }}
+        />
       )}
     </div>
   );
