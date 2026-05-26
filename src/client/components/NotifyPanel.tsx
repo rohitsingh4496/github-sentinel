@@ -33,7 +33,7 @@ export function NotifyPanel({ status, onChange }: Props) {
     setFeedback(null);
     try {
       const res = await api.previewDigest();
-      setPreview(res.message);
+      setPreview(formatMessages(res.messages, res.message));
     } catch (err) {
       setFeedback({
         kind: "err",
@@ -51,7 +51,7 @@ export function NotifyPanel({ status, onChange }: Props) {
       const res = await api.sendDigest();
       setFeedback({
         kind: "ok",
-        text: `enviado · ${res.prs} PRs · ${res.issues} issues`,
+        text: `enviado · ${res.sent} mensajes · ${res.prs} PRs · ${res.issues} issues`,
       });
       await onChange();
     } catch (err) {
@@ -141,6 +141,11 @@ export function NotifyPanel({ status, onChange }: Props) {
       )}
     </div>
   );
+}
+
+function formatMessages(messages: string[], fallback: string): string {
+  if (messages.length === 0) return "(sin mensajes: no hay PRs destacadas)";
+  return messages.join("\n\n---\n\n") || fallback;
 }
 
 function DigestMetric({

@@ -10,6 +10,7 @@ const MAX_MESSAGE_LENGTH = 3500;
 const MAX_PRS_FOR_PRIORITY = 12;
 const MAX_PR_DESCRIPTION_CHARS = 500;
 const MAX_ISSUES_IN_DIGEST = 10;
+const PREVIEW_MESSAGE_SEPARATOR = "\n\n---\n\n";
 
 export type WhatsAppConfig = {
   enabled: boolean;
@@ -105,16 +106,10 @@ export type DigestContext = {
   timezone: string;
 };
 
-export async function buildDigestMessage(
+export async function buildDigestMessages(
   items: DigestItems,
   ctx: DigestContext
-): Promise<string> {
-  const greeting =
-    ctx.slot === "morning"
-      ? "Buenos días"
-      : ctx.slot === "evening"
-        ? "Buenas tardes"
-        : "Resumen";
+): Promise<string[]> {
   const time = new Date().toLocaleString("es-ES", {
     timeZone: ctx.timezone,
     hour: "2-digit",
@@ -124,6 +119,33 @@ export async function buildDigestMessage(
     month: "short",
   });
 
+  if (items.prs.length > 0) {
+    const focus = await buildPullRequestFocus(items.prs);
+    return buildPullRequestMessages(items.prs, focus, time);
+  }
+
+  return [buildFallbackDigestMessage(items, ctx, time)];
+}
+
+export async function buildDigestMessage(
+  items: DigestItems,
+  ctx: DigestContext
+): Promise<string> {
+  const messages = await buildDigestMessages(items, ctx);
+  return messages.join(PREVIEW_MESSAGE_SEPARATOR);
+}
+
+function buildFallbackDigestMessage(
+  items: DigestItems,
+  ctx: DigestContext,
+  time: string
+): string {
+  const greeting =
+    ctx.slot === "morning"
+      ? "Buenos días"
+      : ctx.slot === "evening"
+        ? "Buenas tardes"
+        : "Resumen";
   const lines: string[] = [];
   lines.push(`*GitHub Sentinel* · ${greeting}`);
   lines.push(`_${time}_`);
@@ -139,16 +161,6 @@ export async function buildDigestMessage(
       lines.push(`_último scan: ${relativeAge(items.totals.lastScan)}_`);
     }
     return lines.join("\n");
-  }
-
-  if (items.prs.length > 0) {
-    const total = items.prs.length + items.truncatedPRs;
-    const focus = await buildPullRequestFocus(items.prs);
-
-    lines.push(`*Foco PRs externos (${total} abiertos)*`);
-    if (focus.summary) lines.push(`_${focus.summary}_`);
-    appendPullRequestFocus(lines, items.prs, focus);
-    lines.push("");
   }
 
   if (items.issues.length > 0) {
@@ -177,6 +189,44 @@ export async function buildDigestMessage(
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
   return `${s.slice(0, max - 1).trimEnd()}…`;
+}
+
+function buildPullRequestMessages(
+  prs: PullRequestWithRepo[],
+  focus: PullRequestPriorityResult,
+  time: string
+): string[] {
+  const byId = new Map(prs.map((pr) => [prKey(pr), pr]));
+  const messages: string[] = [];
+
+  for (const item of focus.focus) {
+    const pr = byId.get(item.id);
+    if (!pr) continue;
+
+    const meta = [
+      `${pr.owner}/${pr.repo_name}#${pr.pr_number}`,
+      relativeAge(pr.created_at),
+      pr.comments > 0 ? `${pr.comments}c` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    const labels = parseLabels(pr.labels).slice(0, 3).join(", ");
+
+    const lines = [
+      `*PR ${item.priority.toUpperCase()}* ${meta}`,
+      truncate(cleanText(pr.title), 120),
+      "",
+      item.reason ? `Por qué: ${truncate(item.reason, 150)}` : null,
+      item.action ? `Acción: ${truncate(item.action, 130)}` : null,
+      labels ? `Labels: ${truncate(labels, 90)}` : null,
+      `_${time}_`,
+      pr.html_url,
+    ].filter((line): line is string => line !== null);
+
+    messages.push(lines.join("\n"));
+  }
+
+  return messages;
 }
 
 async function buildPullRequestFocus(
@@ -211,32 +261,6 @@ async function buildPullRequestFocus(
         action: "Revisar si bloquea roadmap o cerrar si no aplica.",
       })),
     };
-  }
-}
-
-function appendPullRequestFocus(
-  lines: string[],
-  prs: PullRequestWithRepo[],
-  focus: PullRequestPriorityResult
-): void {
-  const byId = new Map(prs.map((pr) => [prKey(pr), pr]));
-
-  if (focus.focus.length === 0) {
-    lines.push("No hay una PR claramente prioritaria ahora mismo.");
-    return;
-  }
-
-  for (const item of focus.focus) {
-    const pr = byId.get(item.id);
-    if (!pr) continue;
-    const age = relativeAge(pr.created_at);
-    lines.push(
-      `• *${item.priority.toUpperCase()}* ${pr.owner}/${pr.repo_name} #${pr.pr_number} · ${age}`
-    );
-    lines.push(`  ${truncate(pr.title, 90)}`);
-    if (item.reason) lines.push(`  Por qué: ${item.reason}`);
-    if (item.action) lines.push(`  Acción: ${item.action}`);
-    lines.push(`  ${pr.html_url}`);
   }
 }
 

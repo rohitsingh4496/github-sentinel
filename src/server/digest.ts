@@ -1,7 +1,7 @@
 import { queries } from "./db";
 import { status as sentinelStatus } from "./sentinel";
 import {
-  buildDigestMessage,
+  buildDigestMessages,
   collectDigestItems,
   sendWhatsApp,
   whatsappConfig,
@@ -9,6 +9,10 @@ import {
 } from "./whatsapp";
 
 const LAST_SENT_AT_KEY = "digest:last_sent_at";
+const WHATSAPP_SEND_INTERVAL_MS = positiveInt(
+  process.env.WHATSAPP_SEND_INTERVAL_MS,
+  5000
+);
 
 type CronJobHandle = {
   stop(): CronJobHandle;
@@ -39,14 +43,25 @@ function currentDigestSlot(timezone: string): DigestContext["slot"] {
   return localTimeInTimezone(timezone).hour < 12 ? "morning" : "evening";
 }
 
+function positiveInt(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function runScheduledDigest(): Promise<void> {
   const cfg = whatsappConfig();
   if (!cfg.enabled || !cfg.configured) return;
 
   const slot = currentDigestSlot(cfg.timezone);
   try {
-    await runDigest({ slot, timezone: cfg.timezone });
-    console.log(`[digest] ${new Date().toISOString()} enviado cron="${cfg.cron}"`);
+    const result = await runDigest({ slot, timezone: cfg.timezone });
+    console.log(
+      `[digest] ${new Date().toISOString()} enviados=${result.sent} cron="${cfg.cron}"`
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[digest] error enviando cron="${cfg.cron}": ${msg}`);
@@ -55,15 +70,29 @@ async function runScheduledDigest(): Promise<void> {
 
 export async function runDigest(ctx: DigestContext): Promise<{
   message: string;
+  messages: string[];
+  sent: number;
   prs: number;
   issues: number;
 }> {
   const items = collectDigestItems(sentinelStatus().lastRun);
-  const message = await buildDigestMessage(items, ctx);
-  await sendWhatsApp(message);
-  queries.setSetting.run(LAST_SENT_AT_KEY, new Date().toISOString());
+  const messages = await buildDigestMessages(items, ctx);
+  for (const [index, message] of messages.entries()) {
+    if (index > 0 && WHATSAPP_SEND_INTERVAL_MS > 0) {
+      console.log(
+        `[digest] esperando ${WHATSAPP_SEND_INTERVAL_MS}ms antes del WhatsApp ${index + 1}/${messages.length}`
+      );
+      await sleep(WHATSAPP_SEND_INTERVAL_MS);
+    }
+    await sendWhatsApp(message);
+  }
+  if (messages.length > 0) {
+    queries.setSetting.run(LAST_SENT_AT_KEY, new Date().toISOString());
+  }
   return {
-    message,
+    message: messages.join("\n\n---\n\n"),
+    messages,
+    sent: messages.length,
     prs: items.prs.length + items.truncatedPRs,
     issues: items.issues.length + items.truncatedIssues,
   };
@@ -71,12 +100,15 @@ export async function runDigest(ctx: DigestContext): Promise<{
 
 export async function previewDigest(ctx: DigestContext): Promise<{
   message: string;
+  messages: string[];
   prs: number;
   issues: number;
 }> {
   const items = collectDigestItems(sentinelStatus().lastRun);
+  const messages = await buildDigestMessages(items, ctx);
   return {
-    message: await buildDigestMessage(items, ctx),
+    message: messages.join("\n\n---\n\n"),
+    messages,
     prs: items.prs.length + items.truncatedPRs,
     issues: items.issues.length + items.truncatedIssues,
   };

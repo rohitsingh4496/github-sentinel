@@ -62,6 +62,7 @@ export type Status = {
 
 export type DigestPreview = {
   message: string;
+  messages: string[];
   prs: number;
   issues: number;
 };
@@ -144,7 +145,14 @@ export const api = {
     ),
   previewDigest: () => request<DigestPreview>("/api/notify/preview"),
   sendDigest: () =>
-    request<{ ok: true; message: string; prs: number; issues: number }>(
+    request<{
+      ok: true;
+      message: string;
+      messages: string[];
+      sent: number;
+      prs: number;
+      issues: number;
+    }>(
       "/api/notify/test",
       { method: "POST" }
     ),
