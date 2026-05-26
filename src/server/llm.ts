@@ -4,6 +4,17 @@ const LLM_URL = (process.env.LLM_URL ?? "http://localhost:1234/v1").replace(
 );
 const LLM_MODEL = process.env.LLM_MODEL ?? "local-model";
 const LLM_API_KEY = process.env.LLM_API_KEY ?? "sentinel-local";
+const LLM_MAX_CONTEXT_TOKENS = positiveInt(
+  process.env.LLM_MAX_CONTEXT_TOKENS,
+  4096
+);
+const LLM_MAX_OUTPUT_TOKENS = positiveInt(process.env.LLM_MAX_OUTPUT_TOKENS, 400);
+const LLM_CONTEXT_SAFETY_TOKENS = positiveInt(
+  process.env.LLM_CONTEXT_SAFETY_TOKENS,
+  128
+);
+const APPROX_CHARS_PER_TOKEN = 4;
+const CONTEXT_RETRY_SCALES = [1, 0.5, 0.22] as const;
 
 export type IssueAnalysis = {
   summary: string;
@@ -36,6 +47,20 @@ export type PullRequestPriority = {
 export type PullRequestPriorityResult = {
   summary: string;
   focus: PullRequestPriority[];
+};
+
+type ChatMessage = {
+  role: "system" | "user";
+  content: string;
+};
+
+type ChatCompletionPayload = {
+  model: string;
+  temperature: number;
+  max_tokens: number;
+  response_format: typeof ISSUE_RESPONSE_FORMAT | typeof PR_PRIORITY_RESPONSE_FORMAT;
+  messages: ChatMessage[];
+  stream: false;
 };
 
 const SYSTEM_PROMPT = `Eres un agente de mantenimiento de repositorios open source.
@@ -121,44 +146,195 @@ const PR_PRIORITY_RESPONSE_FORMAT = {
   },
 } as const;
 
+function positiveInt(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function cleanPromptText(value: string): string {
+  return value.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function truncateForPrompt(value: string, maxChars: number): string {
+  const clean = cleanPromptText(value);
+  if (clean.length <= maxChars) return clean;
+  if (maxChars <= 20) return clean.slice(0, Math.max(0, maxChars));
+
+  const marker = "\n...[truncado]...\n";
+  const available = Math.max(0, maxChars - marker.length);
+  const head = Math.ceil(available * 0.7);
+  const tail = available - head;
+
+  return `${clean.slice(0, head).trimEnd()}${marker}${clean
+    .slice(clean.length - tail)
+    .trimStart()}`;
+}
+
+function approxTokens(chars: number): number {
+  return Math.ceil(chars / APPROX_CHARS_PER_TOKEN);
+}
+
+function promptBudgetChars(
+  responseFormat: ChatCompletionPayload["response_format"],
+  scale: number
+): number {
+  const contextChars =
+    Math.max(
+      256,
+      LLM_MAX_CONTEXT_TOKENS - LLM_MAX_OUTPUT_TOKENS - LLM_CONTEXT_SAFETY_TOKENS
+    ) * APPROX_CHARS_PER_TOKEN;
+  const fixedPayloadChars = JSON.stringify({
+    model: LLM_MODEL,
+    temperature: 0,
+    max_tokens: LLM_MAX_OUTPUT_TOKENS,
+    response_format: responseFormat,
+    messages: [
+      { role: "system", content: "" },
+      { role: "user", content: "" },
+    ],
+    stream: false,
+  }).length;
+
+  return Math.max(400, Math.floor((contextChars - fixedPayloadChars) * scale));
+}
+
+function logContext(operation: string, payload: ChatCompletionPayload): void {
+  const promptChars = payload.messages.reduce(
+    (total, message) => total + message.content.length,
+    0
+  );
+  const requestChars = JSON.stringify(payload).length;
+  console.log(
+    `[llm] ${operation} contexto aprox: prompt=${approxTokens(
+      promptChars
+    )} tokens/${promptChars} chars, request=${approxTokens(
+      requestChars
+    )} tokens/${requestChars} chars, max=${LLM_MAX_CONTEXT_TOKENS}, output=${payload.max_tokens}`
+  );
+}
+
+function isContextSizeError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /context.*exceed|exceed.*context|context size|context length|too many tokens|token limit|maximum context/i.test(
+    msg
+  );
+}
+
+async function requestChatCompletion(
+  operation: string,
+  payload: ChatCompletionPayload
+): Promise<string> {
+  logContext(operation, payload);
+
+  const res = await fetch(`${LLM_URL}/chat/completions`, {
+    method: "POST",
+    headers: authHeaders,
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`LLM ${res.status}: ${text.slice(0, 500)}`);
+  }
+
+  const data = (await res.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      total_tokens?: number;
+    };
+  };
+
+  if (data.usage) {
+    console.log(
+      `[llm] ${operation} usage proveedor: prompt=${
+        data.usage.prompt_tokens ?? "?"
+      }, completion=${data.usage.completion_tokens ?? "?"}, total=${
+        data.usage.total_tokens ?? "?"
+      }`
+    );
+  }
+
+  return data.choices?.[0]?.message?.content ?? "";
+}
+
 function buildUserPrompt(input: {
   owner: string;
   repo: string;
   title: string;
   body: string | null;
   labels: string[];
-}) {
-  return `Repositorio: ${input.owner}/${input.repo}
-Labels: ${input.labels.join(", ") || "ninguna"}
+}, maxChars: number) {
+  const labels =
+    input.labels
+      .slice(0, 8)
+      .map((label) => truncateForPrompt(label, 50))
+      .join(", ") || "ninguna";
+  const title = truncateForPrompt(input.title, 240);
+  const withoutBody = `Repositorio: ${input.owner}/${input.repo}
+Labels: ${labels}
 
 Título de la issue:
-${input.title}
+${title}
 
 Descripción:
-${input.body?.slice(0, 4000) || "(sin descripción)"}
+
+Devuelve SOLO el JSON, nada más.`;
+  const bodyMax = Math.max(0, maxChars - withoutBody.length);
+
+  return `Repositorio: ${input.owner}/${input.repo}
+Labels: ${labels}
+
+Título de la issue:
+${title}
+
+Descripción:
+${input.body ? truncateForPrompt(input.body, bodyMax) : "(sin descripción)"}
 
 Devuelve SOLO el JSON, nada más.`;
 }
 
-function buildPullRequestPriorityPrompt(input: PullRequestPriorityInput[]) {
-  const compact = input.map((pr) => ({
-    id: pr.id,
-    repo: pr.repo,
-    number: pr.number,
-    title: pr.title,
-    description: pr.description,
-    author: pr.author,
-    age: pr.age,
-    comments: pr.comments,
-    labels: pr.labels,
-    url: pr.url,
-  }));
+function buildPullRequestPriorityPrompt(
+  input: PullRequestPriorityInput[],
+  maxChars: number
+) {
+  let maxItems = input.length;
+  let descriptionChars = 280;
 
-  return `PRs candidatas en JSON compacto:
+  while (true) {
+    const compact = input.slice(0, maxItems).map((pr) => ({
+      id: truncateForPrompt(pr.id, 120),
+      repo: truncateForPrompt(pr.repo, 100),
+      title: truncateForPrompt(pr.title, 160),
+      description: pr.description
+        ? truncateForPrompt(pr.description, descriptionChars)
+        : null,
+      author: pr.author ? truncateForPrompt(pr.author, 80) : null,
+      age: pr.age,
+      comments: pr.comments,
+      labels: pr.labels.slice(0, 8).map((label) => truncateForPrompt(label, 40)),
+    }));
+
+    const prompt = `PRs candidatas en JSON compacto:
 ${JSON.stringify(compact)}
 
 Elige máximo 3. Si ninguna merece foco real, devuelve focus vacío.
 Devuelve SOLO el JSON, nada más.`;
+
+    if (
+      prompt.length <= maxChars ||
+      (maxItems <= 3 && descriptionChars <= 80)
+    ) {
+      return prompt;
+    }
+
+    if (descriptionChars > 80) {
+      descriptionChars = Math.max(80, Math.floor(descriptionChars * 0.6));
+    } else {
+      maxItems = Math.max(3, maxItems - 2);
+    }
+  }
 }
 
 const authHeaders: HeadersInit = {
@@ -209,30 +385,43 @@ export async function analyzeIssue(input: {
   body: string | null;
   labels: string[];
 }): Promise<IssueAnalysis> {
-  const res = await fetch(`${LLM_URL}/chat/completions`, {
-    method: "POST",
-    headers: authHeaders,
-    body: JSON.stringify({
+  let content = "";
+  for (const [index, scale] of CONTEXT_RETRY_SCALES.entries()) {
+    const promptChars = promptBudgetChars(ISSUE_RESPONSE_FORMAT, scale);
+    const payload: ChatCompletionPayload = {
       model: LLM_MODEL,
       temperature: 0.2,
+      max_tokens: LLM_MAX_OUTPUT_TOKENS,
       response_format: ISSUE_RESPONSE_FORMAT,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: buildUserPrompt(input) },
+        {
+          role: "user",
+          content: buildUserPrompt(
+            input,
+            Math.max(400, promptChars - SYSTEM_PROMPT.length)
+          ),
+        },
       ],
       stream: false,
-    }),
-  });
+    };
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`LLM ${res.status}: ${text.slice(0, 500)}`);
+    try {
+      content = await requestChatCompletion("analyzeIssue", payload);
+      break;
+    } catch (err) {
+      const canRetry =
+        index < CONTEXT_RETRY_SCALES.length - 1 && isContextSizeError(err);
+      if (!canRetry) throw err;
+
+      console.warn(
+        `[llm] analyzeIssue excedió contexto; reintento con presupuesto ${Math.round(
+          CONTEXT_RETRY_SCALES[index + 1]! * 100
+        )}%`
+      );
+    }
   }
 
-  const data = (await res.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  const content = data.choices?.[0]?.message?.content ?? "";
   const jsonRaw = extractJson(content) ?? content;
 
   let parsed: IssueAnalysis;
@@ -269,30 +458,43 @@ export async function prioritizePullRequests(
   if (input.length === 0) return { summary: "Sin PRs externas abiertas.", focus: [] };
 
   const validIds = new Set(input.map((pr) => pr.id));
-  const res = await fetch(`${LLM_URL}/chat/completions`, {
-    method: "POST",
-    headers: authHeaders,
-    body: JSON.stringify({
+  let content = "";
+  for (const [index, scale] of CONTEXT_RETRY_SCALES.entries()) {
+    const promptChars = promptBudgetChars(PR_PRIORITY_RESPONSE_FORMAT, scale);
+    const payload: ChatCompletionPayload = {
       model: LLM_MODEL,
       temperature: 0.1,
+      max_tokens: LLM_MAX_OUTPUT_TOKENS,
       response_format: PR_PRIORITY_RESPONSE_FORMAT,
       messages: [
         { role: "system", content: PR_PRIORITY_SYSTEM_PROMPT },
-        { role: "user", content: buildPullRequestPriorityPrompt(input) },
+        {
+          role: "user",
+          content: buildPullRequestPriorityPrompt(
+            input,
+            Math.max(400, promptChars - PR_PRIORITY_SYSTEM_PROMPT.length)
+          ),
+        },
       ],
       stream: false,
-    }),
-  });
+    };
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`LLM ${res.status}: ${text.slice(0, 500)}`);
+    try {
+      content = await requestChatCompletion("prioritizePullRequests", payload);
+      break;
+    } catch (err) {
+      const canRetry =
+        index < CONTEXT_RETRY_SCALES.length - 1 && isContextSizeError(err);
+      if (!canRetry) throw err;
+
+      console.warn(
+        `[llm] prioritizePullRequests excedió contexto; reintento con presupuesto ${Math.round(
+          CONTEXT_RETRY_SCALES[index + 1]! * 100
+        )}%`
+      );
+    }
   }
 
-  const data = (await res.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  const content = data.choices?.[0]?.message?.content ?? "";
   const jsonRaw = extractJson(content) ?? content;
 
   let parsed: { summary?: unknown; focus?: unknown };
