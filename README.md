@@ -1,8 +1,8 @@
 # GitHub Sentinel
 
 Agente local que vigila tus repositorios de GitHub, detecta nuevas issues y
-te prepara un resumen + propuesta de solución usando un LLM local (Ollama),
-todo sin salir de tu red.
+te prepara un resumen + propuesta de solución usando un LLM vía API compatible
+con OpenAI, todo sin salir de tu red si apuntas a un servidor local.
 
 Pensado para correr 24/7 en un MiniPC o servidor (Windows o macOS).
 
@@ -10,7 +10,7 @@ Pensado para correr 24/7 en un MiniPC o servidor (Windows o macOS).
  ┌─ cron interno (cada N min) ──────────────────────────────────┐
  │   → GitHub REST API   (issues + metadata)                    │
  │   → SQLite local      (issues vistas, no duplicar)           │
- │   → Ollama local      (resumen + tipo + riesgo + propuesta)  │
+ │   → LLM API compatible OpenAI (resumen + riesgo + propuesta) │
  │   → Dashboard React   (terminal-style, Geist Pixel / Mono)   │
  └──────────────────────────────────────────────────────────────┘
 ```
@@ -22,7 +22,7 @@ Pensado para correr 24/7 en un MiniPC o servidor (Windows o macOS).
 - **Runtime**: [Bun](https://bun.com) (servidor + bundler + sqlite + .env loader)
 - **Frontend**: React 19 + Tailwind 4 + Geist Pixel / Geist Mono
 - **Base de datos**: `bun:sqlite` (modo WAL)
-- **LLM**: Ollama (opcional, recomendado `qwen2.5-coder:3b` o `7b`)
+- **LLM**: API compatible con OpenAI (endpoint y modelo configurables)
 
 Sin dependencias extra de Node.js, Express, dotenv, better-sqlite3 ni nada por el estilo.
 
@@ -62,8 +62,9 @@ Bun carga `.env` automáticamente. Variables:
 |---|---|---|
 | `GITHUB_TOKEN` | _(vacío)_ | Fine-grained PAT con permisos read-only de Issues + Metadata sobre los repos a vigilar. **Recomendado**, sin token estás limitado a 60 req/h. |
 | `GITHUB_USER` | _(vacío)_ | Tu usuario, solo para mostrar en el header. Ej: `midudev`. |
-| `OLLAMA_URL` | `http://localhost:11434` | URL de tu instancia de Ollama. Puede apuntar a otra máquina de la LAN. |
-| `OLLAMA_MODEL` | `qwen2.5-coder:3b` | Modelo a usar. Tiene que estar `ollama pull` previamente. |
+| `LLM_URL` | `http://localhost:1234/v1` | URL base del servidor compatible con OpenAI. Debe exponer `/models` y `/chat/completions`. Puede apuntar a otra máquina de la LAN. |
+| `LLM_MODEL` | `local-model` | Nombre del modelo a usar en las llamadas `chat/completions`. |
+| `LLM_API_KEY` | `sentinel-local` | Bearer token para servidores que lo requieran. Si tu servidor local no valida auth, puede ser cualquier string. |
 | `SENTINEL_INTERVAL_MS` | `1800000` (30 min) | Cada cuánto hacer el barrido. |
 | `SENTINEL_DB_PATH` | `data/sentinel.db` | Ruta al SQLite. Puede ser absoluta. |
 | `PORT` | `3741` | Puerto del servidor. |
@@ -78,7 +79,7 @@ Bun carga `.env` automáticamente. Variables:
 | Método | Ruta | Descripción |
 |---|---|---|
 | `GET` | `/api/health` | Healthcheck simple (uptime, pid, plataforma). Útil para monitorización externa. |
-| `GET` | `/api/status` | Estado completo: contadores, ollama, último scan. |
+| `GET` | `/api/status` | Estado completo: contadores, LLM, último scan. |
 | `GET` | `/api/repos` | Lista repos vigilados. |
 | `POST` | `/api/repos` | Añadir repo. Body: `{ "repo": "owner/name" }`. |
 | `DELETE` | `/api/repos/:id` | Dejar de vigilar. |
@@ -96,7 +97,7 @@ src/
     index.ts        # Bun.serve + rutas + shutdown handler
     db.ts           # bun:sqlite, schema y queries preparadas
     github.ts       # cliente GitHub REST (fetch, sin Octokit)
-    llm.ts          # cliente Ollama, JSON forzado
+    llm.ts          # cliente LLM compatible OpenAI, JSON forzado
     sentinel.ts     # scheduler de polling + analyzer en background
   client/
     index.html
@@ -241,7 +242,7 @@ pm2 save
   ```
   Luego: `http://IP-DEL-MINIPC:3741`.
 - **Suspensión**. Desactívala en Configuración → Sistema → Inicio/apagado → "Nunca" para PC y para suspensión.
-- **Ollama**. Si lo instalas en el mismo MiniPC, el default (`http://localhost:11434`) funciona. Si vive en otra máquina, pon `OLLAMA_URL=http://192.168.x.x:11434` en `.env` y abre el puerto 11434 en su firewall.
+- **LLM API**. Si el servidor vive en otra máquina, pon `LLM_URL=http://192.168.x.x:PUERTO/v1` en `.env` y abre ese puerto en su firewall.
 
 ---
 
