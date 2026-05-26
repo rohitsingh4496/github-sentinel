@@ -8,6 +8,8 @@ type Props = {
   onDone: (added: number, skipped: number) => void;
 };
 
+const key = (r: RepoPreview) => `${r.owner}/${r.name}`;
+
 export function UserRepoPicker({ preview, onCancel, onDone }: Props) {
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
@@ -20,16 +22,24 @@ export function UserRepoPicker({ preview, onCancel, onDone }: Props) {
     setError(null);
   }, [preview.user]);
 
+  const repos = useMemo(() => {
+    const seen = new Set<string>();
+    return preview.repos.filter((repo) => {
+      const k = key(repo).toLowerCase();
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  }, [preview.repos]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return preview.repos;
-    return preview.repos.filter((repo) => {
+    if (!q) return repos;
+    return repos.filter((repo) => {
       const hay = `${repo.owner}/${repo.name} ${repo.description ?? ""}`.toLowerCase();
       return hay.includes(q);
     });
-  }, [preview.repos, search]);
-
-  const key = (r: RepoPreview) => `${r.owner}/${r.name}`;
+  }, [repos, search]);
 
   const toggle = (repo: RepoPreview) => {
     if (repo.already_watched) return;
@@ -68,7 +78,7 @@ export function UserRepoPicker({ preview, onCancel, onDone }: Props) {
     setSaving(true);
     setError(null);
     try {
-      const repos = preview.repos
+      const selectedRepos = repos
         .filter((r) => selected.has(key(r)))
         .map((r) => ({
           owner: r.owner,
@@ -77,7 +87,7 @@ export function UserRepoPicker({ preview, onCancel, onDone }: Props) {
           stars: r.stars,
           open_issues: r.open_issues,
         }));
-      const res = await api.bulkAddRepos(repos);
+      const res = await api.bulkAddRepos(selectedRepos);
       onDone(res.added, res.skipped);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -86,8 +96,8 @@ export function UserRepoPicker({ preview, onCancel, onDone }: Props) {
     }
   };
 
-  const alreadyCount = preview.repos.filter((r) => r.already_watched).length;
-  const totalSelectable = preview.repos.length - alreadyCount;
+  const alreadyCount = repos.filter((r) => r.already_watched).length;
+  const totalSelectable = repos.length - alreadyCount;
 
   return (
     <div className="mt-3 border border-[var(--color-ink-3)] bg-[var(--color-ink-1)]">

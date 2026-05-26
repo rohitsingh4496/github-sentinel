@@ -98,9 +98,9 @@ export function IssueCard({
 
           {issue.labels.length > 0 && (
             <div className="flex flex-wrap gap-1.5 mt-2">
-              {issue.labels.slice(0, 5).map((l) => (
+              {issue.labels.slice(0, 5).map((l, index) => (
                 <span
-                  key={l}
+                  key={`${l}-${index}`}
                   className="text-[10px] px-1.5 py-0.5 border border-[var(--color-ink-4)] text-[var(--color-fg-3)] font-mono"
                 >
                   {l}
@@ -155,8 +155,11 @@ export function IssueCard({
               {analysis.files.length > 0 && (
                 <Section title="archivos relevantes">
                   <ul className="font-mono text-sm space-y-1">
-                    {analysis.files.map((f) => (
-                      <li key={f} className="text-[var(--color-fg-2)]">
+                    {analysis.files.map((f, index) => (
+                      <li
+                        key={`${f}-${index}`}
+                        className="text-[var(--color-fg-2)]"
+                      >
                         <span className="text-[var(--color-fg-4)]">→ </span>
                         {f}
                       </li>
